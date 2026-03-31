@@ -13,7 +13,7 @@
 
 This project provides an end-to-end walkthrough of mobile application security analysis — from intercepting network traffic and decompiling APKs, to reverse engineering native libraries and performing runtime instrumentation. Whether you are a penetration tester, security researcher, or developer hardening your own app, this guide covers the core techniques with real-world examples.
 
-**Included Python tools** automate the most common tasks: extracting API endpoints from APK files and analyzing captured HTTP traffic.
+**Included Python tools** automate the most common tasks: extracting API endpoints from APK files, analyzing captured HTTP traffic, auditing permissions, scanning for hardcoded secrets, and detecting SSL pinning implementations.
 
 > **Disclaimer:** This toolkit is intended for **authorized security testing, educational purposes, and legitimate security research only**. Always obtain proper authorization before analyzing any application you do not own. Unauthorized access to computer systems is illegal. The authors are not responsible for any misuse of this material.
 
@@ -57,6 +57,9 @@ This project provides an end-to-end walkthrough of mobile application security a
 - [Included Tools](#included-tools)
   - [APK Endpoint Extractor](#apk-endpoint-extractor)
   - [Traffic Analyzer](#traffic-analyzer)
+  - [APK Permission Auditor](#apk-permission-auditor)
+  - [Secret Scanner](#secret-scanner)
+  - [SSL Pinning Checker](#ssl-pinning-checker)
 - [Typical Analysis Workflow](#typical-analysis-workflow)
 - [Resources & References](#resources--references)
 - [License](#license)
@@ -1248,6 +1251,190 @@ python tools/traffic_analyzer.py capture.har --json --output report.json
 | **Sensitive Data** | Emails, phone numbers, credit cards, JWTs, AWS keys detected in traffic |
 | **Slowest Requests** | Top 10 slowest API calls (performance bottleneck identification) |
 
+### APK Permission Auditor
+
+Extracts all Android permissions from an APK and audits them by risk level. Identifies dangerous permissions, calculates a risk score, and lists exported components that could be attack vectors.
+
+```bash
+# Basic audit — colorful risk-categorized output
+python tools/apk_permission_auditor.py target.apk
+
+# JSON output
+python tools/apk_permission_auditor.py target.apk --json
+
+# Save report
+python tools/apk_permission_auditor.py target.apk --json --output permission_audit.json
+```
+
+**What it audits:**
+
+| Category | Examples |
+|----------|---------|
+| **Critical Risk** | `READ_SMS`, `SEND_SMS`, `READ_CALL_LOG`, `RECORD_AUDIO`, `ACCESS_FINE_LOCATION`, `ACCESS_BACKGROUND_LOCATION` |
+| **High Risk** | `CAMERA`, `READ_CONTACTS`, `READ_PHONE_STATE`, `READ_EXTERNAL_STORAGE`, `CALL_PHONE`, `SYSTEM_ALERT_WINDOW` |
+| **Medium Risk** | `READ_CALENDAR`, `ACTIVITY_RECOGNITION`, `QUERY_ALL_PACKAGES`, `RECEIVE_BOOT_COMPLETED` |
+| **Low Risk** | `WAKE_LOCK`, `FOREGROUND_SERVICE`, `POST_NOTIFICATIONS`, `USE_BIOMETRIC` |
+
+**Additional checks:**
+- **Exported components** — Activities, services, receivers, and providers with `android:exported="true"` that other apps can invoke
+- **Risk score** — Weighted score based on permission severity (Critical x10, High x5, Medium x2, Low x1)
+- **Custom permissions** — Identifies non-standard permissions from third-party SDKs
+
+**Example output:**
+
+```
+╭──────────────────────────────────────────────╮
+│   APK Permission Auditor                     │
+│   File: target.apk                           │
+│   Total Permissions: 18                      │
+│   Dangerous Permissions: 7                   │
+│   Risk Score: CRITICAL (52)                  │
+╰──────────────────────────────────────────────╯
+
+        CRITICAL Risk Permissions (3)
+┌────────────────────────┬───────────┬──────────┬───────────────────────────────┐
+│ Permission             │ Level     │ Group    │ Concern                       │
+├────────────────────────┼───────────┼──────────┼───────────────────────────────┤
+│ ACCESS_FINE_LOCATION   │ dangerous │ Location │ Tracks user's exact location  │
+│ RECORD_AUDIO           │ dangerous │ Micro... │ Can eavesdrop on conversa...  │
+│ READ_SMS               │ dangerous │ SMS      │ Access to all SMS messages    │
+└────────────────────────┴───────────┴──────────┴───────────────────────────────┘
+```
+
+### Secret Scanner
+
+Recursively scans directories for hardcoded secrets, API keys, tokens, and credentials. Optimized for mobile app analysis — works on decompiled APK directories, source code, and config files.
+
+```bash
+# Scan a decompiled APK directory
+python tools/secret_scanner.py ./decompiled_apk/
+
+# Scan with minimum severity filter
+python tools/secret_scanner.py ./decompiled_apk/ --severity high
+
+# JSON output
+python tools/secret_scanner.py ./src/ --json --output secrets_report.json
+```
+
+**Typical workflow:**
+
+```bash
+# Step 1: Decompile APK with JADX
+jadx -d ./decompiled/ target.apk
+
+# Step 2: Scan the decompiled source for secrets
+python tools/secret_scanner.py ./decompiled/
+```
+
+**Detected secret types:**
+
+| Category | Patterns |
+|----------|----------|
+| **Cloud Keys** | AWS Access/Secret Keys, Google API Keys, Google Cloud Service Account JSON |
+| **Firebase** | Database URLs, Cloud Messaging Keys, Config values |
+| **Payment** | Stripe Live/Publishable Keys, PayPal Client credentials |
+| **Communication** | Slack Webhooks/Tokens, Twilio SID/Auth Token, SendGrid Keys |
+| **Version Control** | GitHub PATs, GitLab Tokens |
+| **Crypto** | Private Keys (PEM), Hardcoded IVs/Nonces |
+| **Auth** | JWT Tokens, Bearer Tokens, Generic passwords/secrets |
+| **Infrastructure** | Database connection strings, Internal/Private IPs and URLs |
+
+**Features:**
+- Severity classification (Critical / High / Medium / Low)
+- False positive filtering (skips common placeholder values like `your_api_key`, `TODO`, etc.)
+- Binary file auto-skip (images, compiled code, archives)
+- Context display (shows the surrounding line of code)
+- Deduplication (same secret in same file reported once)
+
+**Example output:**
+
+```
+╭───────────────────────────────────────────────────╮
+│   Secret Scanner                                  │
+│   Directory: /home/user/decompiled_apk            │
+│   Files Scanned: 1,247 (312 skipped)              │
+│   Total Findings: 5                               │
+│   Status: SECRETS FOUND                           │
+│                                                   │
+│   Critical: 1  |  High: 2  |  Medium: 2  |  Low: 0│
+╰───────────────────────────────────────────────────╯
+
+           CRITICAL Findings (1)
+┌──────────────────┬──────────────┬────────────────┬─────────────────────────┐
+│ Type             │ Value        │ File:Line      │ Description             │
+├──────────────────┼──────────────┼────────────────┼─────────────────────────┤
+│ AWS Access Key   │ AKIAIOSFOD.. │ Config.java:42 │ AWS IAM access key ...  │
+└──────────────────┴──────────────┴────────────────┴─────────────────────────┘
+```
+
+### SSL Pinning Checker
+
+Analyzes APK files to detect SSL/TLS certificate pinning implementations. Identifies which pinning methods are used, assesses bypass difficulty, extracts pin hashes, and provides a recommended bypass strategy.
+
+```bash
+# Analyze pinning implementations
+python tools/ssl_pin_checker.py target.apk
+
+# JSON output
+python tools/ssl_pin_checker.py target.apk --json
+
+# Save report
+python tools/ssl_pin_checker.py target.apk --json --output pinning_report.json
+```
+
+**Detected pinning methods:**
+
+| Method | Category | Bypass Difficulty |
+|--------|----------|-------------------|
+| OkHttp3 CertificatePinner | Network Library | Easy |
+| Retrofit + OkHttp Pinning | Network Library | Easy |
+| Network Security Config (XML) | Android Framework | Easy |
+| TrustKit | Third-party Library | Easy |
+| Conscrypt TrustManager | Android Framework | Easy-Medium |
+| Custom TrustManager | Java SSL/TLS | Medium |
+| Custom SSLSocketFactory | Java SSL/TLS | Medium |
+| Embedded Certificate (BKS/P12) | Certificate Bundle | Medium |
+| Manual Certificate Hash Check | Custom Implementation | Medium |
+| React Native SSL Pinning | Framework-specific | Easy-Medium |
+| Flutter SSL Pinning | Framework-specific | Medium-Hard |
+| Native SSL Pinning (.so) | Native Code | Hard |
+
+**Additional detections:**
+- **Anti-tampering checks** — APK signature verification, root detection, Frida detection, Xposed detection, debugger detection
+- **Pin hash extraction** — Extracts SHA-256 pin hashes from code and config
+- **Embedded certificate files** — Finds `.cer`, `.crt`, `.pem`, `.bks`, `.p12` files bundled in the APK
+- **Overall assessment** — Combines all findings into a bypass difficulty rating with step-by-step recommendations
+
+**Example output:**
+
+```
+╭──────────────────────────────────────────────────────────╮
+│   SSL Pinning Checker                                    │
+│   File: target.apk                                      │
+│   Files Analyzed: 2,847                                  │
+│   Pinning Level: Moderate-Strong                         │
+│   Bypass Difficulty: Medium-Hard                         │
+│                                                          │
+│   Assessment: Detected 3 pinning method(s): OkHttp3      │
+│   CertificatePinner, Custom TrustManager, Native SSL     │
+│   Pinning (.so). App also detects Frida.                 │
+╰──────────────────────────────────────────────────────────╯
+
+   Pinning Implementations Detected (3)
+┌───────────────────────┬──────────────┬──────────────────┬──────────────────────────┐
+│ Method                │ Category     │ Bypass Diff.     │ Bypass Method            │
+├───────────────────────┼──────────────┼──────────────────┼──────────────────────────┤
+│ OkHttp3 Certificate.. │ Network Lib  │ Easy             │ Frida hook on check()    │
+│ Custom TrustManager   │ Java SSL/TLS │ Medium           │ Hook checkServerTrust..  │
+│ Native SSL Pinning    │ Native Code  │ Hard             │ Interceptor.attach on..  │
+└───────────────────────┴──────────────┴──────────────────┴──────────────────────────┘
+
+   Recommended Bypass Strategy
+├── 1. Use the Frida SSL pinning bypass script from this toolkit
+├── 2. Rename frida-server binary and use a non-default port
+└── 3. Analyze native .so in Ghidra to find and patch SSL verification functions
+```
+
 ---
 
 ## Typical Analysis Workflow
@@ -1257,20 +1444,23 @@ A typical mobile app security analysis follows these stages:
 ```
 Step 1: Reconnaissance
   │  ├── Obtain the APK (adb pull or download)
-  │  ├── Run apk_endpoint_extractor.py for quick wins
-  │  └── Review AndroidManifest.xml for permissions and components
+  │  ├── Run apk_endpoint_extractor.py → extract URLs, endpoints, keys
+  │  ├── Run apk_permission_auditor.py → audit permissions and risk score
+  │  ├── Run ssl_pin_checker.py → check pinning implementations & bypass strategy
+  │  └── Review AndroidManifest.xml for components and attack surface
   │
 Step 2: Static Analysis
   │  ├── Decompile with JADX — read Java/Kotlin source
+  │  ├── Run secret_scanner.py on decompiled source → find hardcoded secrets
   │  ├── Identify API endpoints, auth logic, security checks
   │  ├── Analyze .so files with Ghidra for native security logic
-  │  └── Map the app's attack surface
+  │  └── Map the app's full attack surface
   │
 Step 3: Traffic Analysis
   │  ├── Set up mitmproxy with CA certificate
-  │  ├── Bypass SSL pinning (Frida or Objection)
+  │  ├── Bypass SSL pinning (use strategy from ssl_pin_checker.py)
   │  ├── Capture all app traffic during normal usage
-  │  └── Analyze with traffic_analyzer.py
+  │  └── Analyze with traffic_analyzer.py → endpoints, auth, sensitive data
   │
 Step 4: Dynamic Analysis
   │  ├── Use Frida to hook interesting functions
